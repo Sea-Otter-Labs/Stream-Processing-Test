@@ -214,6 +214,15 @@ struct StreamInfo
     std::string strStreamAudioFormat;       //音频格式
     std::string strStreamAudioSamplingRate; //采样率
     int  nFlowScore;                        //分数质量
+    int  nVideoResolutiontype;              //分辨率类型
+
+};
+
+//节目
+struct BroadcastDetailsInfo
+{
+    std::string id;                 //节目ID
+    std::string stream_name;        //节目名
 };
 
 struct ErrorItemInfo
@@ -260,7 +269,9 @@ private:
     void SendCSVAsMarkdownToLark(const std::vector<std::pair<std::string, OutStreamInfo>>& vec , int nMaxLine);
     std::string WriteStreamInfoCSVWithContent(const std::vector<std::pair<std::string, OutStreamInfo>>& vec, std::string& outFileName);
 
-    std::vector<StreamInfo> GetSqlDbData();
+    std::vector<StreamInfo> GetStreamInfoSqlDbData();
+    std::vector<BroadcastDetailsInfo> GetBroadcastDetailsInfoSqlDbData();
+
     void WriteSqlDbData(const StreamInfo &stOutputStreamInfo);
     void addSqlDbData(const json &j);
     std::vector<StreamRecord> queryStreamRecords(const std::string& startTime,const std::string& endTime);

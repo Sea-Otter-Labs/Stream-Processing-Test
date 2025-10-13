@@ -147,9 +147,6 @@ void StreamTest::WriteSqlDbData(const StreamInfo &stStreamInfo)
         return;
     }
 
-    // 获取分辨率类型
-    auto t1 = getResolutionType(stStreamInfo.strStreamVideoResolution);
-
     // 用 map 存储待更新的字段和值
     std::map<std::string, std::string> updateFields;
 
@@ -162,8 +159,12 @@ void StreamTest::WriteSqlDbData(const StreamInfo &stStreamInfo)
     if (!stStreamInfo.strStreamAudioFormat.empty())
         updateFields["audio_format"] = stStreamInfo.strStreamAudioFormat;
 
+    if (!stStreamInfo.target_matching_id.empty())
+        updateFields["target_matching_id"] = stStreamInfo.target_matching_id;
+
     // resolution_type 和 flow_score 0 也可能有效，所以直接更新
-    updateFields["resolution_type"] = std::to_string((int)t1);
+    updateFields["resolution_type"] = std::to_string(stStreamInfo.nVideoResolutiontype);
+
     updateFields["flow_score"] = std::to_string((int)stStreamInfo.nFlowScore);
 
     if (!stStreamInfo.strStreamAudioSamplingRate.empty())
@@ -420,7 +421,7 @@ std::vector<StreamRecord> StreamTest::queryStreamRecords(const std::string& star
     return results;
 }
 
-std::vector<StreamInfo> StreamTest::GetSqlDbData()
+std::vector<StreamInfo> StreamTest::GetStreamInfoSqlDbData()
 {
     std::vector<StreamInfo> resultList;
 
@@ -495,6 +496,68 @@ std::vector<StreamInfo> StreamTest::GetSqlDbData()
     return resultList;
 }
 
+std::vector<BroadcastDetailsInfo> StreamTest::GetBroadcastDetailsInfoSqlDbData()
+{
+    std::vector<BroadcastDetailsInfo> resultList;
+
+    MYSQL* conn = mysql_init(nullptr);
+    if (!conn) {
+
+        Logger::getInstance()->error("mysql_init failed");
+        return resultList;
+    }
+
+    if (!mysql_real_connect(conn, SQL_HOST, SQL_USER, SQL_PASSWD, SQL_DBNAME, SQL_PORT, nullptr, 0)) 
+    {
+        Logger::getInstance()->error("Connection failed : {}",mysql_error(conn));
+        return resultList;
+    }
+
+    // 查询所需字段
+    const char* query = "SELECT id, stream_name "
+        "FROM live_broadcast_details ";
+        
+    if (mysql_query(conn, query)) 
+    {
+        Logger::getInstance()->error("Query failed : {}",mysql_error(conn));
+        mysql_close(conn);
+        return resultList;
+    }
+
+    MYSQL_RES* res = mysql_store_result(conn);
+    if (!res) 
+    {
+        Logger::getInstance()->error("mysql_store_result failed : {}",mysql_error(conn));
+        mysql_close(conn);
+        return resultList;
+    }
+
+    MYSQL_ROW row;
+    while ((row = mysql_fetch_row(res))) 
+    {
+        BroadcastDetailsInfo stStreamInfo;
+
+        // row[0] -> id
+        if (row[0]) 
+        {
+            stStreamInfo.id = row[0];
+        }
+
+        // row[1] -> stream_name
+        if (row[1]) 
+        {
+            stStreamInfo.stream_name = row[1];
+        }
+
+        resultList.push_back(std::move(stStreamInfo));
+    }
+
+    mysql_free_result(res);
+    mysql_close(conn);
+
+    return resultList;
+}
+
 void StreamTest::start()
 {
         // === 创建共享内存 stopFlag ===
@@ -517,20 +580,8 @@ void StreamTest::start()
     // 成功请求
     int nIdx = 0;
     int nWhileIdx = 0; //循环次数
-    int nTestNum = 10;//一次测试数量
+    int nTestNum = 20;//一次测试数量
     int nMinTime = 20;//一次测试时间
-
-    auto streamInfo = GetSqlDbData();
-
-    if (streamInfo.empty()) 
-    {
-        Logger::getInstance()->warn("未解析到任何流");
-        return;
-    }
-    else
-    {
-        Logger::getInstance()->info("解析到流:{}条",nIdx);
-    }
 
     std::thread([this]() 
     {
@@ -553,22 +604,67 @@ void StreamTest::start()
                 if (outInfo.stStreamInfo.id.empty()) 
                 {
                     outInfo.stStreamInfo.id = r.url_id;
+                }
+
+                if (outInfo.stStreamInfo.strStreamPath.empty()) 
+                {
                     outInfo.stStreamInfo.strStreamPath = r.flow_address;
+                }
+
+                if (outInfo.stStreamInfo.strStreamName.empty()) 
+                {
                     outInfo.stStreamInfo.strStreamName = r.target_matching;
+                }
+
+                if (outInfo.stStreamInfo.target_matching_id.empty()) 
+                {
                     outInfo.stStreamInfo.target_matching_id = r.target_matching_id;
+                }
+
+                if (outInfo.stStreamInfo.strStreamProtocol.empty()) 
+                {
                     outInfo.stStreamInfo.strStreamProtocol = r.streaming_protocol;
+                }
+
+                if (outInfo.stStreamInfo.strStreamBitrate.empty()) 
+                {
                     outInfo.stStreamInfo.strStreamBitrate = r.bitrate;
+                }
+
+                if (outInfo.stStreamInfo.strStreamLength.empty()) 
+                {
                     outInfo.stStreamInfo.strStreamLength = r.stream_length;
+                }
+
+                if (outInfo.stStreamInfo.strStreamVideoFormat.empty()) 
+                {
                     outInfo.stStreamInfo.strStreamVideoFormat = r.video_format;
-                    outInfo.stStreamInfo.strStreamVideoResolution = r.video_resolution;
+                }
+
+                if (outInfo.stStreamInfo.strStreamAudioFormat.empty()) 
+                {
                     outInfo.stStreamInfo.strStreamAudioFormat = r.audio_format;
+                }
+
+                if (outInfo.stStreamInfo.strStreamAudioSamplingRate.empty()) 
+                {
                     outInfo.stStreamInfo.strStreamAudioSamplingRate = r.audio_sampling_rate;
                 }
-                //强制更新视频分辨率
-                if(outInfo.stStreamInfo.strStreamVideoResolution == "0x0")
+
+                if( outInfo.stStreamInfo.strStreamVideoResolution.empty())
                 {
                     outInfo.stStreamInfo.strStreamVideoResolution = r.video_resolution;
+
                 }
+                else
+                {
+                    //强制更新视频分辨率
+                    if(outInfo.stStreamInfo.strStreamVideoResolution == "0x0")
+                    {
+                        outInfo.stStreamInfo.strStreamVideoResolution = r.video_resolution;
+                    }
+                }
+
                 // 如果 return_value != 0，说明失败
                 if (r.item != OPERATION_OK) 
                 {
@@ -629,12 +725,21 @@ void StreamTest::start()
                 }
             }
 
+            //最后一次
             if(isLastLoop(nWaitTime))
             {
-                //最后一次
+                //获取节目单ID进行匹配
+                auto veBroadcastDetailsInfo = GetBroadcastDetailsInfoSqlDbData();
+                if(veBroadcastDetailsInfo.empty())
+                {
+                    Logger::getInstance()->info("未获取到节目单");
+                    continue;
+                }
+                
                 for (const auto& [url_id, info] : vec) 
                 {
                     StreamInfo si = info.stStreamInfo;
+                    bool b1080p = false;
                     //批量更新数据库
                     if(info.nDetectionNum > 0 && info.nErrorNum <= info.nDetectionNum)
                     {
@@ -646,6 +751,36 @@ void StreamTest::start()
                     {
                         si.nFlowScore = 0;
                     }
+
+                    //根据分辨率更新ID
+                    si.nVideoResolutiontype = (int)getResolutionType(si.strStreamVideoResolution);
+
+                    if(si.nVideoResolutiontype >= (int)VideoResolutionType::FHD1080)
+                        b1080p = true;
+
+                    std::string format = b1080p ? " FHD":" HD";
+                    std::string strStreamNameFormat = si.strStreamName + format;
+                    std::string id;
+                    for(auto & cfg :veBroadcastDetailsInfo)
+                    {
+                        if(cfg.stream_name == strStreamNameFormat)
+                        {
+                            id = cfg.id;
+                            break;
+                        }
+                    }
+
+                    if(id.empty())
+                    {
+                        Logger::getInstance()->info("节目：{}未匹配到对应节目,id:{}",si.strStreamName,si.id);
+                    }
+                    else
+                    {
+                        si.target_matching_id = id;
+                    }
+                    // Logger::getInstance()->info("id:{}, 节目：{} ,节目id:{}, 分辨率；{}"
+                    //     ,si.id,si.strStreamName, si.target_matching_id
+                    //     ,si.nVideoResolutiontype);
                     //更新数据库
                     WriteSqlDbData(si);
                 }
@@ -672,21 +807,30 @@ void StreamTest::start()
         }
     }).detach();
 
+    std::vector<StreamInfo> streamInfo;
+
     while (true) 
     {
         Logger::getInstance()->info("开始批次:{}检测第:{}",nWhileIdx,nIdx);
+        // std::this_thread::sleep_for(std::chrono::minutes(1));
+        // continue;
 
         if (nWhileIdx == 0)
+        {
             m_whileNum ++;
+            streamInfo = GetStreamInfoSqlDbData();
+            if (streamInfo.empty()) 
+            {
+                Logger::getInstance()->warn("未解析到任何流");
+                std::this_thread::sleep_for(std::chrono::seconds(nMinTime));
+                continue;
+            }
+            else
+            {
+                Logger::getInstance()->info("解析到流:{}条",streamInfo.size());
+            }
+        }
 
-        // if (nWhileIdx == 0)
-        // {
-        //     //第一次调用
-        //     HttpServer server;
-        //     std::string response = server.Get(SERVER_HOST, SERVER_PORT, "/api/v1/flow_detection/ffmpeg_detection", "action=start");
-        //     Logger::getInstance()->info("HTTP Response:{}",response);
-        // }
-        
         *stopFlag = false;
         //std::vector<std::thread> workers;
         // 当前批次的 [nIdx, nIdx+nTestNum)
