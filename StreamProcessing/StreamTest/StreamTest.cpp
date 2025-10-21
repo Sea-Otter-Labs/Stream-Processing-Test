@@ -442,6 +442,7 @@ std::vector<StreamInfo> StreamTest::GetStreamInfoSqlDbData()
     const char* query = "SELECT id, url, target_matching ,target_matching_id "
         "FROM live_stream_sources "
         "WHERE is_del = 0 "
+        "AND stream_type != 'XXX' "
         "AND target_matching_id >= 237 ";
         
     if (mysql_query(conn, query)) 
@@ -580,8 +581,8 @@ void StreamTest::start()
     // 成功请求
     int nIdx = 0;
     int nWhileIdx = 0; //循环次数
-    int nTestNum = 20;//一次测试数量
-    int nMinTime = 20;//一次测试时间
+    int nTestNum = 25;//一次测试数量
+    int nMinTime = 10;//一次测试时间
 
     std::thread([this]() 
     {
@@ -702,28 +703,27 @@ void StreamTest::start()
             //SendCSVAsMarkdownToLark(vec, 30); // 每批发送 30 行
 
             //写入文件
-            std::string strFileName;
-            auto data = WriteStreamInfoCSVWithContent(vec,strFileName);
-            if(data.empty())
-            {
-                Logger::getInstance()->error("生成检测结果文件失败");
-            }
-            else
-            {
-                //上传lark
-                std::string strMessage = "生成检测结果文件:" + strFileName;
-                Logger::getInstance()->info("✅ 生成检测结果文件: {}", strFileName);
-
-                // 上传文件到 Lark，路径就是当前目录的文件名
-                if(HttpServer::sendLarkMessage(WEB_HOOK_STREAM_FAIL, strMessage))
-                {
-                    Logger::getInstance()->info("✅ 已上传到 Lark");
-                }
-                else
-                {
-                    Logger::getInstance()->error("❌ 上传到 Lark 失败");
-                }
-            }
+            // std::string strFileName;
+            // auto data = WriteStreamInfoCSVWithContent(vec,strFileName);
+            // if(data.empty())
+            // {
+            //     Logger::getInstance()->error("生成检测结果文件失败");
+            // }
+            // else
+            // {
+            //     //上传lark
+            //     std::string strMessage = "生成检测结果文件:" + strFileName;
+            //     Logger::getInstance()->info("✅ 生成检测结果文件: {}", strFileName);
+            //     // 上传文件到 Lark，路径就是当前目录的文件名
+            //     if(HttpServer::sendLarkMessage(WEB_HOOK_STREAM_FAIL, strMessage))
+            //     {
+            //         Logger::getInstance()->info("✅ 已上传到 Lark");
+            //     }
+            //     else
+            //     {
+            //         Logger::getInstance()->error("❌ 上传到 Lark 失败");
+            //     }
+            // }
 
             //最后一次
             if(isLastLoop(nWaitTime))
@@ -735,7 +735,10 @@ void StreamTest::start()
                     Logger::getInstance()->info("未获取到节目单");
                     continue;
                 }
-                
+
+                std::string target_matching_id;
+                bool bFlowScore = false;
+
                 for (const auto& [url_id, info] : vec) 
                 {
                     StreamInfo si = info.stStreamInfo;
@@ -751,7 +754,7 @@ void StreamTest::start()
                     {
                         si.nFlowScore = 0;
                     }
-
+                    
                     //根据分辨率更新ID
                     si.nVideoResolutiontype = (int)getResolutionType(si.strStreamVideoResolution);
 
@@ -768,6 +771,34 @@ void StreamTest::start()
                             id = cfg.id;
                             break;
                         }
+                    }
+
+                    //储存节目名称
+                    if(target_matching_id.empty())
+                    {
+                        target_matching_id = si.target_matching_id;
+                    }
+                    else if(target_matching_id != si.target_matching_id)
+                    {
+                        //更新上一个节目的记录
+                        if(bFlowScore == false)
+                        {
+                            std::string strMessage = "节目:" + si.strStreamName + " " + format+" 所有源质量过差低于60分";
+                            Logger::getInstance()->info("{}", strMessage);
+                            // 上传文件到 Lark，路径就是当前目录的文件名
+                            if(!HttpServer::sendLarkMessage(WEB_HOOK_STREAM_FAIL, strMessage))
+                            {
+                                Logger::getInstance()->error("❌ 上传到 Lark 失败");
+                            }
+                        }
+
+                        target_matching_id = si.target_matching_id;
+                        bFlowScore = false;
+                    }
+
+                    if(si.nFlowScore > 60)
+                    {
+                        bFlowScore = true;
                     }
 
                     if(id.empty())
@@ -872,10 +903,51 @@ void StreamTest::start()
         // 等待 nMinTime 秒
         std::this_thread::sleep_for(std::chrono::seconds(nMinTime));
         *stopFlag = true; // 通知线程停止
+        // std::this_thread::sleep_for(std::chrono::seconds(5));
 
-        // 等待所有线程退出
-        for (pid_t pid : workers) {
-            waitpid(pid, nullptr, 0);
+        // // 等待所有线程退出
+        // for (pid_t pid : workers) 
+        // {
+        //     kill(pid, SIGKILL);
+        //     waitpid(pid, nullptr, 0);
+        // }
+
+        constexpr int MAX_WAIT_SECONDS = 5;
+        auto start_time = std::chrono::steady_clock::now();
+
+        bool allExited = false;
+        while (std::chrono::steady_clock::now() - start_time < std::chrono::seconds(MAX_WAIT_SECONDS)) 
+        {
+            allExited = true;
+            for (pid_t pid : workers) 
+            {
+                int status;
+                pid_t result = waitpid(pid, &status, WNOHANG);  // 非阻塞等待
+                if (result == 0) {
+                    allExited = false; // 这个子进程还在
+                } else if (result == -1) {
+                    // 子进程可能已退出或不存在
+                    continue;
+                }
+            }
+
+            if (allExited)
+                break; // 所有子进程都退出了，提前结束等待
+
+            std::this_thread::sleep_for(std::chrono::milliseconds(200)); // 每200ms轮询一次
+        }
+
+        // 超时后强制终止还在运行的进程
+        if (!allExited) 
+        {
+            for (pid_t pid : workers) 
+            {
+                if (kill(pid, 0) == 0) // 仍存在
+                {
+                    kill(pid, SIGKILL);
+                    waitpid(pid, nullptr, 0);
+                }
+            }
         }
 
         // 更新下一个批次的起始索引
@@ -886,7 +958,6 @@ void StreamTest::start()
             nIdx = 0; // 循环
             nWhileIdx = 0;
         } 
-
     }
 
     //munmap(stopFlag, sizeof(bool));

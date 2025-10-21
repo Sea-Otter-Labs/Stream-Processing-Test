@@ -104,7 +104,6 @@ extern "C" {
     url_id
 */
 
-
 enum class VideoResolutionType {
     UNKNOWN = 1,
     QQVGA,      // 160x120
@@ -215,7 +214,6 @@ struct StreamInfo
     std::string strStreamAudioSamplingRate; //采样率
     int  nFlowScore;                        //分数质量
     int  nVideoResolutiontype;              //分辨率类型
-
 };
 
 //节目
