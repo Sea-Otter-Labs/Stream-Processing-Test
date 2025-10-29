@@ -421,6 +421,249 @@ std::vector<StreamRecord> StreamTest::queryStreamRecords(const std::string& star
     return results;
 }
 
+std::vector<VendorFlowStat> StreamTest::GetVendorFlowStats()
+{
+    std::vector<VendorFlowStat> stats;
+
+    MYSQL* conn = mysql_init(nullptr);
+    if (!conn) 
+    {
+        Logger::getInstance()->error("mysql_init failed");
+        return stats;
+    }
+
+    if (!mysql_real_connect(conn, SQL_HOST, SQL_USER, SQL_PASSWD, SQL_DBNAME, SQL_PORT, nullptr, 0)) {
+        Logger::getInstance()->error("Connection failed: {}", mysql_error(conn));
+        return stats;
+    }
+
+    // SQL 查询
+    const char* query = R"(
+        SELECT 
+            vendor,
+            SUM(CASE WHEN flow_score < 60 THEN 1 ELSE 0 END) AS score_lt_60,
+            SUM(CASE WHEN flow_score BETWEEN 60 AND 80 THEN 1 ELSE 0 END) AS score_60_80,
+            SUM(CASE WHEN flow_score > 80 AND flow_score <=100 THEN 1 ELSE 0 END) AS score_80_100,
+            COUNT(*) AS total
+        FROM (
+            SELECT 
+                lss.*,
+                CASE 
+                    WHEN lss.url LIKE 'http://278172839.xyz:80/%' THEN 'Vendor 278172839.xyz'
+                    WHEN lss.url LIKE 'http://estengo.com:80/%' 
+                         OR lss.url LIKE 'http://blc.vpn.guard447.cyou:80/%' THEN 'Vendor estengo.com'
+                    ELSE 'Other'
+                END AS vendor
+            FROM live_stream_sources lss
+            WHERE lss.target_matching_id >= 237
+              AND lss.is_del = 0
+              AND lss.stream_type <> 'XXX'
+        ) AS t
+        WHERE vendor IN ('Vendor 278172839.xyz', 'Vendor estengo.com')
+        GROUP BY vendor
+    )";
+
+    if (mysql_query(conn, query)) {
+        Logger::getInstance()->error("Query failed: {}", mysql_error(conn));
+        mysql_close(conn);
+        return stats;
+    }
+
+    MYSQL_RES* res = mysql_store_result(conn);
+    if (!res) {
+        Logger::getInstance()->error("mysql_store_result failed: {}", mysql_error(conn));
+        mysql_close(conn);
+        return stats;
+    }
+
+    MYSQL_ROW row;
+    while ((row = mysql_fetch_row(res))) {
+        VendorFlowStat stat;
+        if (row[0]) stat.vendor = row[0];
+        if (row[1]) stat.count_lt60 = std::stoi(row[1]);
+        if (row[2]) stat.count_60_80 = std::stoi(row[2]);
+        if (row[3]) stat.count_80_100 = std::stoi(row[3]);
+        if (row[4]) stat.total = std::stoi(row[4]);
+        stats.push_back(std::move(stat));
+    }
+
+    mysql_free_result(res);
+    mysql_close(conn);
+    return stats;
+}
+
+void StreamTest::StartCheckProgram()
+{
+    auto Program = GetValidStreamNames();
+
+    // 获取日期
+    std::time_t t = std::time(nullptr);
+    std::tm* now = std::localtime(&t);
+    char dateBuf[32];
+    std::strftime(dateBuf, sizeof(dateBuf), "%Y-%m-%d", now);
+
+    // 没有节目情况
+    if (Program.empty()) {
+        std::string msg = "============== " + std::string(dateBuf) + " =====================\n"
+                          "暂无符合条件的节目（所有源质量均 > 60 分）\n"
+                          "============================================";
+        Logger::getInstance()->info("{}", msg);
+        HttpServer::sendLarkMessage(WEB_HOOK_PROGRAM_DETECTION, msg);
+        return;
+    }
+
+    // 每批最多30条
+    const size_t batchSize = 30;
+    size_t total = Program.size();
+    size_t batchCount = (total + batchSize - 1) / batchSize;
+
+    Logger::getInstance()->info("开始上传节目检测结果，共 {} 个节目，将分 {} 批上传", total, batchCount);
+
+    for (size_t batch = 0; batch < batchCount; ++batch)
+    {
+        size_t start = batch * batchSize;
+        size_t end = std::min(start + batchSize, total);
+
+        std::stringstream ss;
+        ss << "============== " << dateBuf << " =====================\n";
+        if (batch == 0)
+            ss << "共检测到 " << total << " 个节目，其中所有源质量过差（低于60分）的节目如下：\n";
+        ss << "(第 " << (batch + 1) << "/" << batchCount << " 批)\n";
+
+        for (size_t i = start; i < end; ++i) {
+            ss << "节目: " << Program[i] << " 所有源质量过差（低于60分）\n";
+        }
+
+        ss << "============================================";
+
+        std::string message = ss.str();
+
+        // 打印日志
+        Logger::getInstance()->info("{}", message);
+
+        // 上传到 Lark
+        if (!HttpServer::sendLarkMessage(WEB_HOOK_PROGRAM_DETECTION, message)) {
+            Logger::getInstance()->error("❌ 第 {} 批上传到 Lark 失败", batch + 1);
+        } else {
+            Logger::getInstance()->info("✅ 第 {} 批节目检测结果已上传到 Lark", batch + 1);
+        }
+
+        // 防止请求过于频繁
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    }
+
+    Logger::getInstance()->info("✅ 所有节目检测结果已成功上传到 Lark");
+}
+
+void StreamTest::UploadVendorFlowStatsToLark()
+{
+    auto stats = GetVendorFlowStats();
+    if (stats.empty()) {
+        Logger::getInstance()->info("暂无符合条件的数据");
+        return;
+    }
+
+    // 获取日期
+    std::time_t t = std::time(nullptr);
+    std::tm* now = std::localtime(&t);
+    char dateBuf[32];
+    std::strftime(dateBuf, sizeof(dateBuf), "%Y-%m-%d", now);
+
+    // 每批 2 条厂商数据上传（可调整 batchSize）
+    const size_t batchSize = 2;
+    size_t totalBatches = (stats.size() + batchSize - 1) / batchSize;
+
+    for (size_t batch = 0; batch < totalBatches; ++batch) {
+        size_t start = batch * batchSize;
+        size_t end = std::min(start + batchSize, stats.size());
+
+        std::stringstream ss;
+        ss << "============== " << dateBuf
+           << " (第 " << (batch + 1) << "/" << totalBatches << " 批) =====================\n";
+
+        for (size_t i = start; i < end; ++i) {
+            const auto& s = stats[i];
+            ss << s.vendor << " 厂商流质量统计:\n"
+               << "  <60分: " << s.count_lt60 << " (" << s.pct_lt60() << "%)\n"
+               << "  60~80分: " << s.count_60_80 << " (" << s.pct_60_80() << "%)\n"
+               << "  80~100分: " << s.count_80_100 << " (" << s.pct_80_100() << "%)\n"
+               << "  总数: " << s.total << "\n";
+        }
+
+        ss << "============================================";
+
+        std::string message = ss.str();
+
+        // 上传 Lark
+        if (!HttpServer::sendLarkMessage(WEB_HOOK_PROGRAM_DETECTION, message)) {
+            Logger::getInstance()->error("❌ 第 {} 批上传到 Lark 失败", batch + 1);
+        } else {
+            Logger::getInstance()->info("✅ 第 {} 批厂商流质量统计已上传到 Lark", batch + 1);
+        }
+
+        // 延时防止频繁请求
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    }
+}
+
+std::vector<std::string> StreamTest::GetValidStreamNames()
+{
+    std::vector<std::string> streamNames;
+
+    MYSQL* conn = mysql_init(nullptr);
+    if (!conn) {
+        Logger::getInstance()->error("mysql_init failed");
+        return streamNames;
+    }
+
+    if (!mysql_real_connect(conn, SQL_HOST, SQL_USER, SQL_PASSWD, SQL_DBNAME, SQL_PORT, nullptr, 0)) {
+        Logger::getInstance()->error("Connection failed: {}", mysql_error(conn));
+        return streamNames;
+    }
+
+    // ✅ 查询语句
+    const char* query =
+        "SELECT DISTINCT lbd.stream_name "
+        "FROM live_stream_sources AS lss "
+        "JOIN live_broadcast_details AS lbd "
+        "ON lss.target_matching_id = lbd.id "
+        "WHERE lss.target_matching_id IN ("
+        "    SELECT target_matching_id "
+        "    FROM live_stream_sources "
+        "    WHERE target_matching_id >= 237 "
+        "      AND is_del = 0 "
+        "      AND stream_type <> 'XXX' "
+        "    GROUP BY target_matching_id "
+        "    HAVING MAX(flow_score) <= 60"
+        ");";
+
+    if (mysql_query(conn, query)) {
+        Logger::getInstance()->error("Query failed: {}", mysql_error(conn));
+        mysql_close(conn);
+        return streamNames;
+    }
+
+    MYSQL_RES* res = mysql_store_result(conn);
+    if (!res) {
+        Logger::getInstance()->error("mysql_store_result failed: {}", mysql_error(conn));
+        mysql_close(conn);
+        return streamNames;
+    }
+
+    MYSQL_ROW row;
+    while ((row = mysql_fetch_row(res))) {
+        if (row[0]) {
+            streamNames.emplace_back(row[0]);
+        }
+    }
+
+    mysql_free_result(res);
+    mysql_close(conn);
+
+    Logger::getInstance()->info("Loaded {} valid stream names", streamNames.size());
+    return streamNames;
+}
+
 std::vector<StreamInfo> StreamTest::GetStreamInfoSqlDbData()
 {
     std::vector<StreamInfo> resultList;
@@ -561,7 +804,7 @@ std::vector<BroadcastDetailsInfo> StreamTest::GetBroadcastDetailsInfoSqlDbData()
 
 void StreamTest::start()
 {
-        // === 创建共享内存 stopFlag ===
+    // === 创建共享内存 stopFlag ===
     stopFlag = (bool*)mmap(nullptr, sizeof(bool),
                                  PROT_READ | PROT_WRITE,
                                  MAP_SHARED | MAP_ANONYMOUS, -1, 0);
@@ -736,9 +979,6 @@ void StreamTest::start()
                     continue;
                 }
 
-                std::string target_matching_id;
-                bool bFlowScore = false;
-
                 for (const auto& [url_id, info] : vec) 
                 {
                     StreamInfo si = info.stStreamInfo;
@@ -773,34 +1013,6 @@ void StreamTest::start()
                         }
                     }
 
-                    //储存节目名称
-                    if(target_matching_id.empty())
-                    {
-                        target_matching_id = si.target_matching_id;
-                    }
-                    else if(target_matching_id != si.target_matching_id)
-                    {
-                        //更新上一个节目的记录
-                        if(bFlowScore == false)
-                        {
-                            std::string strMessage = "节目:" + si.strStreamName + " " + format+" 所有源质量过差低于60分";
-                            Logger::getInstance()->info("{}", strMessage);
-                            // 上传文件到 Lark，路径就是当前目录的文件名
-                            if(!HttpServer::sendLarkMessage(WEB_HOOK_STREAM_FAIL, strMessage))
-                            {
-                                Logger::getInstance()->error("❌ 上传到 Lark 失败");
-                            }
-                        }
-
-                        target_matching_id = si.target_matching_id;
-                        bFlowScore = false;
-                    }
-
-                    if(si.nFlowScore > 60)
-                    {
-                        bFlowScore = true;
-                    }
-
                     if(id.empty())
                     {
                         Logger::getInstance()->info("节目：{}未匹配到对应节目,id:{}",si.strStreamName,si.id);
@@ -815,6 +1027,10 @@ void StreamTest::start()
                     //更新数据库
                     WriteSqlDbData(si);
                 }
+
+                StartCheckProgram();
+
+                UploadVendorFlowStatsToLark();
 
                 std::string strMessage = "更新分数项目数量:" + std::to_string(vec.size());
                 Logger::getInstance()->info("✅ 更新分数: {}", vec.size());

@@ -19,7 +19,8 @@ using json = nlohmann::json;
 // 服务器端口
 #define SERVER_PORT 8003
 #define WEB_HOOK_STREAM_FAIL "https://open.larksuite.com/open-apis/bot/v2/hook/de65a92f-2039-4ce4-bfcb-df65bdad1523"
-
+#define WEB_HOOK_PROGRAM_DETECTION "https://open.larksuite.com/open-apis/bot/v2/hook/999038e7-a5e5-46d2-94be-dd446957fec3"
+#define WEB_HOOK_PROGRAM_DETECTION_1 "https://open.larksuite.com/open-apis/bot/v2/hook/32d6ffb9-095e-4443-abda-6c175007aa6a"
 #define SQL_HOST "database-1.cn4csgi60ope.eu-west-3.rds.amazonaws.com"
 #define SQL_USER "pplive"
 #define SQL_PASSWD "pplive123$"
@@ -103,6 +104,19 @@ extern "C" {
     target_matching
     url_id
 */
+
+struct VendorFlowStat 
+{
+    std::string vendor;    // 厂商名
+    int count_lt60;        // flow_score < 60
+    int count_60_80;       // 60 <= flow_score <= 80
+    int count_80_100;      // 80 < flow_score <= 100
+    int total;             // 总数
+
+    double pct_lt60() const { return total ? (count_lt60 * 100.0 / total) : 0.0; }
+    double pct_60_80() const { return total ? (count_60_80 * 100.0 / total) : 0.0; }
+    double pct_80_100() const { return total ? (count_80_100 * 100.0 / total) : 0.0; }
+};
 
 enum class VideoResolutionType {
     UNKNOWN = 1,
@@ -263,6 +277,12 @@ private:
     //std::atomic<bool> stopFlag{false};
     bool *stopFlag = nullptr;
     int m_whileNum = 0; //循环次数
+
+    void StartCheckProgram();
+    std::vector<std::string> GetValidStreamNames();
+
+    void UploadVendorFlowStatsToLark();
+    std::vector<VendorFlowStat> GetVendorFlowStats();
 
     void SendCSVAsMarkdownToLark(const std::vector<std::pair<std::string, OutStreamInfo>>& vec , int nMaxLine);
     std::string WriteStreamInfoCSVWithContent(const std::vector<std::pair<std::string, OutStreamInfo>>& vec, std::string& outFileName);
